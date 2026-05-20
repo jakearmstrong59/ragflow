@@ -738,9 +738,71 @@ func (n *NovitaModel) Rerank(modelName *string, query string, documents []string
 	return nil, fmt.Errorf("%s, no such method", n.Name())
 }
 
-// Balance is not exposed by the Novita API.
+type novitaUserResponse struct {
+	CreditBalance float64                `json:"credit_balance"`
+	AllowFeatures []string               `json:"allow_features"`
+	FreeTrial     map[string]interface{} `json:"free_trial"`
+}
+
+// Balance returns the tenant's remaining Novita credit via the documented
+// /v3/user endpoint. The response surfaces credit_balance (remaining quota,
+// not spent) plus allow_features and free_trial so callers can render the
+// account state in the admin UI.
 func (n *NovitaModel) Balance(apiConfig *APIConfig) (map[string]interface{}, error) {
-	return nil, fmt.Errorf("%s, no such method", n.Name())
+	if apiConfig == nil || apiConfig.ApiKey == nil || *apiConfig.ApiKey == "" {
+		return nil, fmt.Errorf("api key is required")
+	}
+
+	region := "default"
+	if apiConfig.Region != nil && *apiConfig.Region != "" {
+		region = *apiConfig.Region
+	}
+
+	baseURL, err := n.baseURLForRegion(region)
+	if err != nil {
+		return nil, err
+	}
+	if n.URLSuffix.Balance == "" {
+		return nil, fmt.Errorf("novita: no balance URL suffix configured")
+	}
+	url := fmt.Sprintf("%s/%s", baseURL, n.URLSuffix.Balance)
+
+	ctx, cancel := context.WithTimeout(context.Background(), nonStreamCallTimeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", *apiConfig.ApiKey))
+
+	resp, err := n.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to send request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("Novita balance API error: %s, body: %s", resp.Status, string(body))
+	}
+
+	var parsed novitaUserResponse
+	if err = json.Unmarshal(body, &parsed); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	return map[string]interface{}{
+		"credit_balance": parsed.CreditBalance,
+		"allow_features": parsed.AllowFeatures,
+		"free_trial":     parsed.FreeTrial,
+	}, nil
 }
 
 func (n *NovitaModel) TranscribeAudio(modelName *string, file *string, apiConfig *APIConfig, asrConfig *ASRConfig) (*ASRResponse, error) {

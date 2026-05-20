@@ -49,7 +49,7 @@ func newNovitaServer(t *testing.T, expectedPath string, handler func(t *testing.
 func newNovitaForTest(baseURL string) *NovitaModel {
 	return NewNovitaModel(
 		map[string]string{"default": baseURL},
-		URLSuffix{Chat: "openai/v1/chat/completions", Models: "openai/v1/models"},
+		URLSuffix{Chat: "openai/v1/chat/completions", Models: "openai/v1/models", Balance: "v3/user"},
 	)
 }
 
@@ -650,14 +650,6 @@ func TestNovitaCheckConnection(t *testing.T) {
 	}
 }
 
-func TestNovitaEmbedReturnsNoSuchMethod(t *testing.T) {
-	m := "x"
-	_, err := newNovitaForTest("http://unused").Embed(&m, []string{"a"}, &APIConfig{}, nil)
-	if err == nil || !strings.Contains(err.Error(), "no such method") {
-		t.Errorf("got %v", err)
-	}
-}
-
 func TestNovitaRerankReturnsNoSuchMethod(t *testing.T) {
 	m := "x"
 	_, err := newNovitaForTest("http://unused").Rerank(&m, "q", []string{"a"}, &APIConfig{}, &RerankConfig{TopN: 1})
@@ -666,9 +658,63 @@ func TestNovitaRerankReturnsNoSuchMethod(t *testing.T) {
 	}
 }
 
-func TestNovitaBalanceReturnsNoSuchMethod(t *testing.T) {
-	if _, err := newNovitaForTest("http://unused").Balance(&APIConfig{}); err == nil || !strings.Contains(err.Error(), "no such method") {
-		t.Errorf("got %v", err)
+func TestNovitaBalanceHappyPath(t *testing.T) {
+	srv := newNovitaServer(t, "/v3/user", func(t *testing.T, _ map[string]interface{}, w http.ResponseWriter) {
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"credit_balance": 12.34,
+			"allow_features": []string{"upload_model"},
+			"free_trial":     map[string]interface{}{"training": 1},
+		})
+	})
+	defer srv.Close()
+
+	apiKey := "test-key"
+	resp, err := newNovitaForTest(srv.URL).Balance(&APIConfig{ApiKey: &apiKey})
+	if err != nil {
+		t.Fatalf("Balance: %v", err)
+	}
+	if got := resp["credit_balance"]; got != 12.34 {
+		t.Errorf("credit_balance=%v want 12.34", got)
+	}
+	feats, ok := resp["allow_features"].([]string)
+	if !ok || len(feats) != 1 || feats[0] != "upload_model" {
+		t.Errorf("allow_features=%v", resp["allow_features"])
+	}
+	ft, ok := resp["free_trial"].(map[string]interface{})
+	if !ok || ft["training"] != float64(1) {
+		t.Errorf("free_trial=%v", resp["free_trial"])
+	}
+}
+
+func TestNovitaBalanceRequiresAPIKey(t *testing.T) {
+	if _, err := newNovitaForTest("http://unused").Balance(&APIConfig{}); err == nil || !strings.Contains(err.Error(), "api key is required") {
+		t.Errorf("err=%v", err)
+	}
+}
+
+func TestNovitaBalanceSurfacesHTTPError(t *testing.T) {
+	srv := newNovitaServer(t, "/v3/user", func(t *testing.T, _ map[string]interface{}, w http.ResponseWriter) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"reason":"unauthorized"}`))
+	})
+	defer srv.Close()
+
+	apiKey := "test-key"
+	_, err := newNovitaForTest(srv.URL).Balance(&APIConfig{ApiKey: &apiKey})
+	if err == nil || !strings.Contains(err.Error(), "Novita balance API error") {
+		t.Errorf("err=%v", err)
+	}
+}
+
+func TestNovitaBalanceRejectsMissingBalanceSuffix(t *testing.T) {
+	m := NewNovitaModel(
+		map[string]string{"default": "http://unused"},
+		URLSuffix{Chat: "openai/v1/chat/completions"},
+	)
+	apiKey := "test-key"
+	_, err := m.Balance(&APIConfig{ApiKey: &apiKey})
+	if err == nil || !strings.Contains(err.Error(), "no balance URL suffix configured") {
+		t.Errorf("err=%v", err)
 	}
 }
 
